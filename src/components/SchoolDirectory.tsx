@@ -88,15 +88,17 @@ export const SchoolDirectory: React.FC<SchoolDirectoryProps> = ({
     }));
 
     if (search.trim()) {
-      const q = search.toLowerCase();
+      const q = search.toLowerCase().trim();
       result = result.filter(
         (s) =>
           s.schoolName.toLowerCase().includes(q) ||
           s.udiseCode.toLowerCase().includes(q) ||
           s.village.toLowerCase().includes(q) ||
-          s.lgdPanchayat.toLowerCase().includes(q) ||
-          s.pinCode.includes(q) ||
-          s.address.toLowerCase().includes(q)
+          (s.lgdPanchayat || '').toLowerCase().includes(q) ||
+          (s.block || '').toLowerCase().includes(q) ||
+          (s.cluster || '').toLowerCase().includes(q) ||
+          (s.pinCode || '').includes(q) ||
+          (s.address || '').toLowerCase().includes(q)
       );
     }
 

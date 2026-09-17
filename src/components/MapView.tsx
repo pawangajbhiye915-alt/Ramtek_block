@@ -1,16 +1,16 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import {
-  Compass,
+  MapPin,
   Navigation,
   Layers,
-  ZoomIn,
-  ZoomOut,
-  Maximize2,
-  Filter,
+  Compass,
   CheckCircle2,
   ExternalLink,
   Plus,
+  Search,
+  Filter,
   Info,
 } from 'lucide-react';
 import { SchoolRecord, UserLocation, LocationStatus } from '../types';
@@ -19,23 +19,38 @@ import { calculateDistanceKm, generateDirectionsUrl } from '../utils/geo';
 interface MapViewProps {
   schools: SchoolRecord[];
   userLocation: UserLocation | null;
+  selectedSchool: SchoolRecord | null;
+  focusedSchool: SchoolRecord | null;
   onSelectSchool: (school: SchoolRecord) => void;
   onAddToVisitPlan: (school: SchoolRecord) => void;
   visitPlanUdiseCodes: Set<string>;
-  routeSchools?: SchoolRecord[];
-  focusedSchool?: SchoolRecord | null;
+  routeSchools: SchoolRecord[];
 }
 
 const RAMTEK_CENTER: [number, number] = [21.3980, 79.3308];
 
+const MAP_RADIUS_OPTIONS: { label: string; value: number | null }[] = [
+  { label: '5 KM', value: 5 },
+  { label: '10 KM', value: 10 },
+  { label: '15 KM', value: 15 },
+  { label: '20 KM', value: 20 },
+  { label: '25 KM', value: 25 },
+  { label: '50 KM', value: 50 },
+  { label: '100 KM', value: 100 },
+  { label: '150 KM', value: 150 },
+  { label: '200 KM', value: 200 },
+  { label: 'ALL', value: null },
+];
+
 export const MapView: React.FC<MapViewProps> = ({
   schools,
   userLocation,
+  selectedSchool,
+  focusedSchool,
   onSelectSchool,
   onAddToVisitPlan,
   visitPlanUdiseCodes,
-  routeSchools = [],
-  focusedSchool = null,
+  routeSchools,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -43,8 +58,10 @@ export const MapView: React.FC<MapViewProps> = ({
   const circleLayerRef = useRef<L.Circle | null>(null);
   const routePolylineRef = useRef<L.Polyline | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
+  const markersMapRef = useRef<Map<string, L.Marker>>(new Map());
 
-  const [selectedRadiusKm, setSelectedRadiusKm] = useState<number>(200);
+  // Geographic Radius Filter (Distance ceiling, NOT a result count limit)
+  const [selectedRadiusKm, setSelectedRadiusKm] = useState<number | null>(100);
   const [filterLocStatus, setFilterLocStatus] = useState<string>('ALL');
   const [mapSearch, setMapSearch] = useState<string>('');
 
@@ -65,7 +82,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
     switch (status) {
       case 'EXACT SCHOOL LOCATION':
-        bgColor = '#059669'; // emerald
+        bgColor = '#059669'; // emerald green
         label = 'E';
         break;
       case 'VILLAGE LOCATION':
@@ -92,25 +109,41 @@ export const MapView: React.FC<MapViewProps> = ({
     });
   };
 
-  // Filter schools on the map
+  // Filter schools on the map - Shows ALL matching schools within radius
   const visibleSchools = useMemo(() => {
     const lat = userLocation?.latitude ?? RAMTEK_CENTER[0];
     const lng = userLocation?.longitude ?? RAMTEK_CENTER[1];
 
     return schools.filter((s) => {
       const dist = calculateDistanceKm(lat, lng, s.latitude, s.longitude);
-      if (dist > selectedRadiusKm) return false;
+      if (selectedRadiusKm !== null && dist > selectedRadiusKm) return false;
 
       if (filterLocStatus !== 'ALL' && s.locationStatus !== filterLocStatus) {
         return false;
       }
 
+      // Search across all 7 fields
       if (mapSearch.trim()) {
-        const q = mapSearch.toLowerCase();
+        const q = mapSearch.toLowerCase().trim();
         const matchesName = s.schoolName.toLowerCase().includes(q);
-        const matchesVillage = s.village.toLowerCase().includes(q);
-        const matchesUdise = s.udiseCode.includes(q);
-        if (!matchesName && !matchesVillage && !matchesUdise) return false;
+        const matchesUdise = (s.udiseCode || '').toLowerCase().includes(q);
+        const matchesVillage = (s.village || '').toLowerCase().includes(q);
+        const matchesGP = (s.lgdPanchayat || '').toLowerCase().includes(q);
+        const matchesBlock = (s.block || '').toLowerCase().includes(q);
+        const matchesCluster = (s.cluster || '').toLowerCase().includes(q);
+        const matchesPin = (s.pinCode || '').toLowerCase().includes(q);
+
+        if (
+          !matchesName &&
+          !matchesUdise &&
+          !matchesVillage &&
+          !matchesGP &&
+          !matchesBlock &&
+          !matchesCluster &&
+          !matchesPin
+        ) {
+          return false;
+        }
       }
 
       return true;
@@ -141,11 +174,11 @@ export const MapView: React.FC<MapViewProps> = ({
 
     // Coverage Radius Circle
     circleLayerRef.current = L.circle(RAMTEK_CENTER, {
-      radius: selectedRadiusKm * 1000,
+      radius: (selectedRadiusKm ?? 100) * 1000,
       color: '#3b82f6',
       fillColor: '#3b82f6',
-      fillOpacity: 0.05,
-      weight: 1.5,
+      fillOpacity: selectedRadiusKm === null ? 0 : 0.05,
+      weight: selectedRadiusKm === null ? 0 : 1.5,
       dashArray: '5, 8',
     }).addTo(map);
 
@@ -157,14 +190,20 @@ export const MapView: React.FC<MapViewProps> = ({
     };
   }, []);
 
-  // Update Coverage Radius Circle when selectedRadiusKm changes
+  // Update Coverage Radius Circle when selectedRadiusKm or userLocation changes
   useEffect(() => {
     if (!mapInstanceRef.current || !circleLayerRef.current) return;
     const center = userLocation
-      ? [userLocation.latitude, userLocation.longitude] as [number, number]
+      ? ([userLocation.latitude, userLocation.longitude] as [number, number])
       : RAMTEK_CENTER;
     circleLayerRef.current.setLatLng(center);
-    circleLayerRef.current.setRadius(selectedRadiusKm * 1000);
+
+    if (selectedRadiusKm === null) {
+      circleLayerRef.current.setStyle({ fillOpacity: 0, weight: 0 });
+    } else {
+      circleLayerRef.current.setStyle({ fillOpacity: 0.05, weight: 1.5 });
+      circleLayerRef.current.setRadius(selectedRadiusKm * 1000);
+    }
   }, [selectedRadiusKm, userLocation]);
 
   // Update User Location Live Marker
@@ -208,17 +247,17 @@ export const MapView: React.FC<MapViewProps> = ({
     }
   }, [userLocation]);
 
-  // Update School Markers on Layer
+  // Render EVERY visible school marker on the map - NO DISCARDING
   useEffect(() => {
     if (!mapInstanceRef.current || !markersLayerRef.current) return;
-    const map = mapInstanceRef.current;
     const layer = markersLayerRef.current;
     layer.clearLayers();
+    markersMapRef.current.clear();
 
-    // Map of route schools for index numbering
     const routeIndexMap = new Map<string, number>();
     routeSchools.forEach((s, idx) => routeIndexMap.set(s.udiseCode, idx));
 
+    // Show every single filtered school marker
     visibleSchools.forEach((school) => {
       const isRouteStop = routeIndexMap.get(school.udiseCode);
       const icon = createMarkerIcon(school.locationStatus, isRouteStop);
@@ -231,29 +270,45 @@ export const MapView: React.FC<MapViewProps> = ({
 
       const inPlan = visitPlanUdiseCodes.has(school.udiseCode);
 
+      // Format location accuracy
+      const accuracyLabel =
+        school.locationStatus === 'EXACT SCHOOL LOCATION'
+          ? '✓ Exact School Compound'
+          : 'Approximate Location (Village / GP)';
+
       const popupHtml = `
-        <div style="min-width: 240px; font-family: system-ui, -apple-system, sans-serif;">
+        <div style="min-width: 260px; font-family: system-ui, -apple-system, sans-serif; padding: 2px;">
           <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
             <span style="font-size: 10px; font-weight: 700; color: #1e293b; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">UDISE: ${school.udiseCode}</span>
-            <span style="font-size: 10px; font-weight: 700; color: #1e40af; background: #dbeafe; padding: 2px 6px; border-radius: 4px;">${dist} KM</span>
+            <span style="font-size: 11px; font-weight: 800; color: #1e40af; background: #dbeafe; padding: 2px 6px; border-radius: 4px;">${dist} KM away</span>
           </div>
+
           <h4 style="margin: 0 0 4px 0; font-size: 14px; font-weight: 700; color: #0f172a; line-height: 1.3;">
             ${school.schoolName}
           </h4>
-          <div style="font-size: 11px; color: #475569; margin-bottom: 6px;">
-            <strong>Village:</strong> ${school.village} | <strong>GP:</strong> ${school.lgdPanchayat}
+
+          <div style="font-size: 11px; color: #475569; margin-bottom: 6px; line-height: 1.4;">
+            <div><strong>Village:</strong> ${school.village} | <strong>GP:</strong> ${school.lgdPanchayat || school.village}</div>
+            <div><strong>Block:</strong> ${school.block} | <strong>Cluster:</strong> ${school.cluster} | <strong>PIN:</strong> ${school.pinCode}</div>
           </div>
-          <div style="font-size: 10px; padding: 4px 6px; border-radius: 4px; background: #f8fafc; border: 1px solid #e2e8f0; margin-bottom: 8px;">
-            <strong>Status:</strong> ${school.locationStatus}<br/>
-            <span style="color: #64748b;">${school.locationAccuracy}</span>
+
+          <div style="font-size: 10px; padding: 4px 6px; border-radius: 6px; background: #f8fafc; border: 1px solid #e2e8f0; margin-bottom: 8px;">
+            <div><strong>Accuracy:</strong> <span style="color: ${school.locationStatus === 'EXACT SCHOOL LOCATION' ? '#059669' : '#2563eb'}; font-weight: 600;">${accuracyLabel}</span></div>
+            <div><strong>Category:</strong> ${school.schoolCategory}</div>
+            <div><strong>Management:</strong> ${school.schoolManagement} | <strong>Type:</strong> ${school.schoolType}</div>
+            <div><strong>Status:</strong> <span style="font-weight: 600; color: #059669;">${school.schoolStatus}</span></div>
           </div>
+
           <div style="display: flex; gap: 4px; border-top: 1px solid #e2e8f0; padding-top: 8px;">
-            <button id="btn-popup-details-${school.udiseCode}" style="flex: 1; padding: 5px 8px; background: #0284c7; color: white; border: none; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer;">
+            <button id="btn-popup-details-${school.udiseCode}" style="flex: 1; padding: 6px 6px; background: #0284c7; color: white; border: none; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer;">
               Details
             </button>
-            <a href="${generateDirectionsUrl(school, userLocation)}" target="_blank" rel="noopener noreferrer" style="flex: 1; text-align: center; text-decoration: none; padding: 5px 8px; background: #059669; color: white; border-radius: 6px; font-size: 11px; font-weight: 600;">
+            <a href="${generateDirectionsUrl(school, userLocation)}" target="_blank" rel="noopener noreferrer" style="flex: 1; text-align: center; text-decoration: none; padding: 6px 6px; background: #059669; color: white; border-radius: 6px; font-size: 11px; font-weight: 700;">
               Directions
             </a>
+            <button id="btn-popup-plan-${school.udiseCode}" style="flex: 1; padding: 6px 6px; background: ${inPlan ? '#d97706' : '#4f46e5'}; color: white; border: none; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer;">
+              ${inPlan ? 'In Plan' : '+ Plan'}
+            </button>
           </div>
         </div>
       `;
@@ -262,16 +317,37 @@ export const MapView: React.FC<MapViewProps> = ({
 
       marker.on('popupopen', () => {
         setTimeout(() => {
-          const btn = document.getElementById(`btn-popup-details-${school.udiseCode}`);
-          if (btn) {
-            btn.onclick = () => onSelectSchool(school);
+          const btnDetails = document.getElementById(`btn-popup-details-${school.udiseCode}`);
+          if (btnDetails) {
+            btnDetails.onclick = () => onSelectSchool(school);
+          }
+          const btnPlan = document.getElementById(`btn-popup-plan-${school.udiseCode}`);
+          if (btnPlan) {
+            btnPlan.onclick = () => onAddToVisitPlan(school);
           }
         }, 50);
       });
 
       layer.addLayer(marker);
+      markersMapRef.current.set(school.udiseCode, marker);
     });
   }, [visibleSchools, userLocation, routeSchools, visitPlanUdiseCodes]);
+
+  // Handle focusedSchool flyTo animation and auto-popup
+  useEffect(() => {
+    if (!mapInstanceRef.current || !focusedSchool) return;
+    const map = mapInstanceRef.current;
+    map.flyTo([focusedSchool.latitude, focusedSchool.longitude], 15, {
+      duration: 1.2,
+    });
+
+    const marker = markersMapRef.current.get(focusedSchool.udiseCode);
+    if (marker) {
+      setTimeout(() => {
+        marker.openPopup();
+      }, 1200);
+    }
+  }, [focusedSchool]);
 
   // Update Route Polyline if active stops exist
   useEffect(() => {
@@ -301,14 +377,6 @@ export const MapView: React.FC<MapViewProps> = ({
     }
   }, [routeSchools, userLocation]);
 
-  // Focus specific school when passed
-  useEffect(() => {
-    if (!mapInstanceRef.current || !focusedSchool) return;
-    mapInstanceRef.current.flyTo([focusedSchool.latitude, focusedSchool.longitude], 15, {
-      duration: 1.2,
-    });
-  }, [focusedSchool]);
-
   const recenterMap = (target: 'ramtek' | 'user') => {
     if (!mapInstanceRef.current) return;
     if (target === 'user' && userLocation) {
@@ -319,42 +387,52 @@ export const MapView: React.FC<MapViewProps> = ({
   };
 
   return (
-    <div id="interactive-map-view" className="relative w-full h-[calc(100vh-140px)] min-h-[550px] bg-slate-100 flex flex-col">
-      {/* Top Map Control Bar */}
-      <div className="absolute top-4 left-4 right-4 z-[1000] pointer-events-none flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-        {/* Radius Filter & Search Bar */}
-        <div className="pointer-events-auto bg-white/95 backdrop-blur-xs p-2 rounded-2xl shadow-lg border border-slate-200/80 flex flex-wrap items-center gap-2 max-w-2xl">
-          <div className="flex items-center space-x-1 pl-2 text-xs font-bold text-slate-700">
-            <Compass className="w-4 h-4 text-blue-600" />
-            <span>Coverage Radius:</span>
+    <div className="relative w-full h-[calc(100vh-140px)] min-h-[580px] bg-slate-100 overflow-hidden">
+      {/* Floating Filter Controls Header */}
+      <div className="absolute top-4 left-4 right-4 z-[1000] pointer-events-none flex flex-col md:flex-row md:items-center justify-between gap-3">
+        {/* Radius Filter & Search Toolbar */}
+        <div className="pointer-events-auto bg-white/95 backdrop-blur-xs p-2 rounded-2xl shadow-lg border border-slate-200/80 flex flex-wrap items-center gap-2 max-w-full">
+          {/* Dynamic Pin Counter */}
+          <div className="flex items-center space-x-1 px-3 py-1.5 bg-blue-50 text-blue-900 rounded-xl text-xs font-bold border border-blue-100">
+            <MapPin className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+            <span>
+              {visibleSchools.length} {visibleSchools.length === 1 ? 'school' : 'schools'} on map
+              {selectedRadiusKm !== null ? ` (within ${selectedRadiusKm} KM)` : ' (All Distances)'}
+            </span>
           </div>
 
-          <div className="flex items-center space-x-1">
-            {[5, 15, 25, 50, 100, 200].map((radius) => (
+          <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block"></div>
+
+          {/* Radius selector buttons - 5, 10, 15, 20, 25, 50, 100, 150, 200 KM, ALL */}
+          <div className="flex items-center flex-wrap gap-1">
+            {MAP_RADIUS_OPTIONS.map((opt) => (
               <button
-                key={radius}
-                onClick={() => setSelectedRadiusKm(radius)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                  selectedRadiusKm === radius
+                key={opt.label}
+                onClick={() => setSelectedRadiusKm(opt.value)}
+                className={`px-2 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  selectedRadiusKm === opt.value
                     ? 'bg-blue-600 text-white shadow-xs'
                     : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
                 }`}
               >
-                {radius} KM
+                {opt.label}
               </button>
             ))}
           </div>
 
-          <div className="h-4 w-px bg-slate-300 mx-1 hidden sm:block"></div>
+          <div className="h-4 w-px bg-slate-200 mx-1 hidden sm:block"></div>
 
-          {/* Quick Search on Map */}
-          <input
-            type="text"
-            value={mapSearch}
-            onChange={(e) => setMapSearch(e.target.value)}
-            placeholder="Filter pins on map..."
-            className="px-2.5 py-1 text-xs rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-36 sm:w-44"
-          />
+          {/* Quick Search on Map - Searches across all 7 fields */}
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400" />
+            <input
+              type="text"
+              value={mapSearch}
+              onChange={(e) => setMapSearch(e.target.value)}
+              placeholder="Search map pins..."
+              className="pl-8 pr-2.5 py-1 text-xs rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-36 sm:w-44"
+            />
+          </div>
         </div>
 
         {/* Recenter & Map Tools */}
@@ -362,8 +440,8 @@ export const MapView: React.FC<MapViewProps> = ({
           {userLocation && (
             <button
               onClick={() => recenterMap('user')}
-              className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-lg text-xs font-semibold flex items-center space-x-1.5 transition-all"
-              title="Center on My GPS Location"
+              className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-lg text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer"
+              title="Center on My Live GPS Location"
             >
               <Navigation className="w-3.5 h-3.5" />
               <span>Center GPS</span>
@@ -371,7 +449,7 @@ export const MapView: React.FC<MapViewProps> = ({
           )}
           <button
             onClick={() => recenterMap('ramtek')}
-            className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl shadow-lg text-xs font-semibold flex items-center space-x-1.5 transition-all"
+            className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl shadow-lg text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer"
             title="Reset to Ramtek Center"
           >
             <Compass className="w-3.5 h-3.5" />
@@ -384,7 +462,7 @@ export const MapView: React.FC<MapViewProps> = ({
       <div className="absolute bottom-6 left-4 z-[1000] bg-white/95 backdrop-blur-xs p-3.5 rounded-2xl shadow-lg border border-slate-200/80 max-w-xs text-xs space-y-2">
         <div className="font-bold text-slate-900 flex items-center justify-between">
           <span>Map Pin Legend</span>
-          <span className="text-[11px] font-normal text-slate-500">{visibleSchools.length} pins active</span>
+          <span className="text-[11px] font-normal text-slate-500">{visibleSchools.length} pins plotted</span>
         </div>
         <div className="space-y-1.5 text-[11px]">
           <div className="flex items-center space-x-2">
@@ -393,11 +471,11 @@ export const MapView: React.FC<MapViewProps> = ({
           </div>
           <div className="flex items-center space-x-2">
             <span className="w-3.5 h-3.5 rounded-full bg-blue-600 inline-block shrink-0"></span>
-            <span className="text-slate-700">Village Location (Settlement Pin)</span>
+            <span className="text-slate-700">Approximate Location (Village Pin)</span>
           </div>
           <div className="flex items-center space-x-2">
             <span className="w-3.5 h-3.5 rounded-full bg-purple-600 inline-block shrink-0"></span>
-            <span className="text-slate-700">Gram Panchayat Location (Fallback)</span>
+            <span className="text-slate-700">Approximate Location (Gram Panchayat)</span>
           </div>
           <div className="flex items-center space-x-2">
             <span className="w-3.5 h-3.5 rounded-full bg-amber-500 inline-block shrink-0"></span>
@@ -405,8 +483,8 @@ export const MapView: React.FC<MapViewProps> = ({
           </div>
         </div>
         <div className="pt-1.5 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-400">
-          <span>Coverage: 200 KM</span>
-          <span>Dashed Circle = Active Radius</span>
+          <span>{selectedRadiusKm !== null ? `Radius: ${selectedRadiusKm} KM` : 'All Distances'}</span>
+          <span>All matching pins rendered</span>
         </div>
       </div>
 

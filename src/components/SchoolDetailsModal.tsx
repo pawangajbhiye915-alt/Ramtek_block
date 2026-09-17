@@ -84,13 +84,13 @@ export const SchoolDetailsModal: React.FC<SchoolDetailsModalProps> = ({
       case 'VILLAGE LOCATION':
         return (
           <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800 border border-blue-300">
-            VILLAGE LOCATION
+            APPROXIMATE LOCATION (Village Level)
           </span>
         );
       case 'GRAM PANCHAYAT LOCATION':
         return (
           <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800 border border-indigo-300">
-            GRAM PANCHAYAT LOCATION
+            APPROXIMATE LOCATION (Gram Panchayat Level)
           </span>
         );
       case 'LOCATION NEEDS VERIFICATION':
